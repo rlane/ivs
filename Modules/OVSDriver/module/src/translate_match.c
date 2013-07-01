@@ -227,7 +227,7 @@ ind_ovs_key_to_cfr(const struct ind_ovs_parsed_key *pkey,
         cfr->nw_dst = pkey->ipv4.ipv4_dst;
     } else if (ATTR_BITMAP_TEST(pkey->populated, OVS_KEY_ATTR_ARP)) {
         cfr->nw_tos = 0;
-        cfr->nw_proto = ntohs(pkey->arp.arp_op) & 0xFF;
+        cfr->nw_proto = 0; //ntohs(pkey->arp.arp_op) & 0xFF;
         cfr->nw_src = pkey->arp.arp_sip;
         cfr->nw_dst = pkey->arp.arp_tip;
     } else {
@@ -286,11 +286,11 @@ ind_ovs_match_to_cfr(const of_match_t *match,
     }
 
     fields->nw_tos = match->fields.ip_dscp & 0xFC;
-    fields->nw_proto = match->fields.ip_proto;
+    fields->nw_proto = 0; //match->fields.ip_proto;
     fields->nw_src = htonl(match->fields.ipv4_src);
     fields->nw_dst = htonl(match->fields.ipv4_dst);
     masks->nw_tos = match->masks.ip_dscp & 0xFC;
-    masks->nw_proto = match->masks.ip_proto;
+    masks->nw_proto = 0; //match->masks.ip_proto;
     masks->nw_src = htonl(match->masks.ipv4_src);
     masks->nw_dst = htonl(match->masks.ipv4_dst);
 
