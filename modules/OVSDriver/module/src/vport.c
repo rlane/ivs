@@ -42,7 +42,7 @@ static struct nl_cache *link_cache;
 static struct nl_cb *netlink_callbacks;
 
 static indigo_error_t port_status_notify(uint32_t port_no, unsigned reason);
-static void port_desc_set(of_port_desc_t *of_port_desc, of_port_no_t of_port_num);
+static void port_desc_set(of_port_desc_t *of_port_desc, struct ind_ovs_port *port);
 static void alloc_port_counters(struct ind_ovs_port_counters *pcounters);
 static void free_port_counters(struct ind_ovs_port_counters *pcounters);
 static uint64_t get_packet_stats(struct stats_handle *handle);
@@ -157,7 +157,7 @@ indigo_error_t indigo_port_features_get(
     for (i = 0; i < IND_OVS_MAX_PORTS; i++) {
         if (ind_ovs_ports[i]) {
             truncate_of_object(of_port_desc);
-            port_desc_set(of_port_desc, i);
+            port_desc_set(of_port_desc, ind_ovs_ports[i]);
             /* TODO error handling */
             of_list_port_desc_append(of_list_port_desc, of_port_desc);
         }
@@ -676,52 +676,19 @@ out:
     return err;
 }
 
-indigo_error_t indigo_port_desc_stats_get(
-    of_port_desc_stats_reply_t *port_desc_stats_reply)
+indigo_error_t
+indigo_port_desc_stats_get_one(
+    of_port_no_t port_no,
+    of_port_desc_t *of_port_desc)
 {
-    indigo_error_t result = INDIGO_ERROR_NONE;
-
-    of_port_desc_t *of_port_desc = 0;
-    of_list_port_desc_t *of_list_port_desc = 0;
-
-    if (port_desc_stats_reply->version < OF_VERSION_1_3) {
-        return INDIGO_ERROR_NONE;
+    struct ind_ovs_port *port = ind_ovs_port_lookup(port_no);
+    if (port == NULL) {
+        return INDIGO_ERROR_NOT_FOUND;
     }
 
-    if ((of_port_desc = of_port_desc_new(port_desc_stats_reply->version)) == 0) {
-        LOG_ERROR("of_port_desc_new() failed");
-        result = INDIGO_ERROR_UNKNOWN;
-        goto done;
-    }
+    port_desc_set(of_port_desc, port);
 
-    if ((of_list_port_desc = of_list_port_desc_new(port_desc_stats_reply->version)) == 0) {
-        LOG_ERROR("of_list_port_desc_new() failed");
-        result = INDIGO_ERROR_UNKNOWN;
-        goto done;
-    }
-
-    int i;
-    for (i = 0; i < IND_OVS_MAX_PORTS; i++) {
-        if (ind_ovs_ports[i]) {
-            truncate_of_object(of_port_desc);
-            port_desc_set(of_port_desc, i);
-            /* TODO error handling */
-            of_list_port_desc_append(of_list_port_desc, of_port_desc);
-        }
-    }
-
-    if (LOXI_FAILURE(of_port_desc_stats_reply_entries_set(port_desc_stats_reply,
-            of_list_port_desc))){
-        LOG_ERROR("of_port_desc_stats_reply_entries_set() failed");
-        result = INDIGO_ERROR_UNKNOWN;
-        goto done;
-    }
-
- done:
-    if (of_list_port_desc) of_list_port_desc_delete(of_list_port_desc);
-    if (of_port_desc) of_port_desc_delete(of_port_desc);
-
-    return (result);
+    return INDIGO_ERROR_NONE;
 }
 
 /* Currently returns an empty reply */
@@ -878,6 +845,9 @@ port_status_notify(uint32_t port_no, unsigned reason)
     of_port_status_t *of_port_status = 0;
     of_version_t ctrlr_of_version;
 
+    struct ind_ovs_port *port = ind_ovs_port_lookup(port_no);
+    AIM_TRUE_OR_DIE(port != NULL);
+
     if (indigo_cxn_get_async_version(&ctrlr_of_version) != INDIGO_ERROR_NONE) {
         LOG_TRACE("No active controller connection");
         return INDIGO_ERROR_NONE;
@@ -889,7 +859,7 @@ port_status_notify(uint32_t port_no, unsigned reason)
         goto done;
     }
 
-    port_desc_set(of_port_desc, port_no);
+    port_desc_set(of_port_desc, port);
 
     if ((of_port_status = of_port_status_new(ctrlr_of_version)) == 0) {
         LOG_ERROR("of_port_status_new() failed");
@@ -918,16 +888,9 @@ port_status_notify(uint32_t port_no, unsigned reason)
 }
 
 static void
-port_desc_set(of_port_desc_t *of_port_desc, uint32_t port_no)
+port_desc_set(of_port_desc_t *of_port_desc, struct ind_ovs_port *port)
 {
-    struct ind_ovs_port *port = ind_ovs_ports[port_no];
-    assert(port != NULL);
-
-    if (port_no == OVSP_LOCAL) {
-        of_port_desc_port_no_set(of_port_desc, OF_PORT_DEST_LOCAL);
-    } else {
-        of_port_desc_port_no_set(of_port_desc, port_no);
-    }
+    of_port_desc_port_no_set(of_port_desc, port->port_no);
 
     of_port_desc_hw_addr_set(of_port_desc, port->mac_addr);
     of_port_desc_name_set(of_port_desc, port->ifname);
