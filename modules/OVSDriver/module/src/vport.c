@@ -298,11 +298,14 @@ ind_ovs_port_added(uint32_t port_no, const char *ifname,
         rtnl_link_put(link);
     }
 
+    struct ind_ovs_port *port = aim_zmalloc(sizeof(*port));
+
     if (port_no == OVSP_LOCAL) {
         ifname = "local";
+        port->port_no = OF_PORT_DEST_LOCAL;
+    } else {
+        port->port_no = port_no;
     }
-
-    struct ind_ovs_port *port = aim_zmalloc(sizeof(*port));
 
     strncpy(port->ifname, ifname, sizeof(port->ifname));
     port->dp_port_no = port_no;
