@@ -352,6 +352,8 @@ ind_ovs_port_added(uint32_t port_no, const char *ifname,
 
     ind_ovs_ports[port_no] = port;
 
+    indigo_core_port_register(port->port_no, &port->register_handle);
+
     if ((err = port_status_notify(port_no, OF_PORT_CHANGE_REASON_ADD)) < 0) {
         LOG_WARN("failed to notify controller of port addition");
         debug_counter_inc(&add_notify_failed);
@@ -405,6 +407,8 @@ ind_ovs_port_deleted(uint32_t port_no)
     bool was_uplink = port->is_uplink;
 
     debug_counter_inc(&delete);
+
+    indigo_core_port_unregister(port->register_handle);
 
     ind_ovs_upcall_unregister(port);
 
