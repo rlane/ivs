@@ -55,6 +55,7 @@ DEBUG_COUNTER(add_redundant, "ovsdriver.vport.add_redundant", "Received port add
 DEBUG_COUNTER(add, "ovsdriver.vport.add", "Received port add notification for a new port");
 DEBUG_COUNTER(add_notify_failed, "ovsdriver.vport.add_notify_failed", "Failed to notify controller of new port");
 DEBUG_COUNTER(add_failed, "ovsdriver.vport.add_failed", "Failed to add port");
+DEBUG_COUNTER(add_out_of_range, "ovsdriver.vport.add_out_of_range", "Failed to add port due to too-high port number");
 DEBUG_COUNTER(delete_redundant, "ovsdriver.vport.delete_redundant", "Received port delete notification for nonexistent port");
 DEBUG_COUNTER(delete, "ovsdriver.vport.delete", "Received port delete notification");
 DEBUG_COUNTER(delete_notify_failed, "ovsdriver.vport.delete_notify_failed", "Failed to notify controller of deleted port");
@@ -267,6 +268,18 @@ ind_ovs_port_added(uint32_t port_no, const char *ifname,
                    enum ovs_vport_type type)
 {
     indigo_error_t err;
+
+    if (port_no >= IND_OVS_MAX_PORTS) {
+        AIM_LOG_WARN("Attempted to add port number %u (%s) >= %u", port_no, ifname, IND_OVS_MAX_PORTS);
+        debug_counter_inc(&add_out_of_range);
+
+        /* Remove port from kernel datapath */
+        struct nl_msg *msg = ind_ovs_create_nlmsg(ovs_vport_family, OVS_VPORT_CMD_DEL);
+        nla_put_u32(msg, OVS_VPORT_ATTR_PORT_NO, port_no);
+        ind_ovs_transact(msg);
+
+        return;
+    }
 
     if (ind_ovs_ports[port_no]) {
         debug_counter_inc(&add_redundant);
