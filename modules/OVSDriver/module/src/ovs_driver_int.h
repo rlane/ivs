@@ -105,6 +105,7 @@ struct ind_ovs_upcall_thread;
  */
 struct ind_ovs_port {
     char ifname[IFNAMSIZ]; /* Linux network interface name */
+    int ifindex; /* Linux network interface ifindex */
     of_port_no_t port_no; /* OpenFlow port number */
     uint32_t dp_port_no; /* Kernel datapath port number */
     int ifflags; /* Linux interface flags */

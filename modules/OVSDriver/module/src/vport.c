@@ -125,22 +125,6 @@ ind_ovs_port_lookup_by_name(const char *ifname)
     return NULL;
 }
 
-static struct ind_ovs_port *
-ind_ovs_port_lookup_by_ifindex(int ifindex)
-{
-    /* Search link cache by interface index */
-    struct rtnl_link *link = rtnl_link_get(link_cache, ifindex);
-    if (link == NULL) {
-        AIM_LOG_ERROR("failed to retrieve link with if_index: %d", ifindex);
-        return NULL;
-    }
-
-    const char *ifname = rtnl_link_get_name(link);
-    rtnl_link_put(link);
-
-    return ind_ovs_port_lookup_by_name(ifname);
-}
-
 /* TODO populate more fields of the port desc */
 indigo_error_t indigo_port_features_get(
     of_features_reply_t *features)
@@ -300,6 +284,11 @@ ind_ovs_port_added(uint32_t port_no, const char *ifname,
 
     debug_counter_inc(&add);
 
+    /* Ensure link cache is up to date before looking up new link */
+    nl_cache_mngr_data_ready(route_cache_mngr);
+
+    struct ind_ovs_port *port = aim_zmalloc(sizeof(*port));
+
     of_mac_addr_t mac_addr = of_mac_addr_all_zeros;
     struct rtnl_link *link = rtnl_link_get_by_name(link_cache, ifname);
     if (link) {
@@ -307,10 +296,9 @@ ind_ovs_port_added(uint32_t port_no, const char *ifname,
         void *data = nl_addr_get_binary_addr(addr);
         AIM_ASSERT(nl_addr_get_len(addr) == sizeof(mac_addr));
         memcpy(&mac_addr, data, sizeof(mac_addr));
+        port->ifindex = rtnl_link_get_ifindex(link);
         rtnl_link_put(link);
     }
-
-    struct ind_ovs_port *port = aim_zmalloc(sizeof(*port));
 
     if (port_no == OVSP_LOCAL) {
         ifname = "local";
@@ -669,110 +657,31 @@ indigo_port_queue_config_get(
     return INDIGO_ERROR_NONE;
 }
 
-/*
- * queue 0 maps to class 1, queue 1 maps to class 2 and so on.
- * Hence, subtract one from the minor version of parent class
- * and return as the queue_id
- *
- * For Root qdisc return TC_H_ROOT
- */
-static uint32_t
-qdisc_get_queue_id(struct nl_object *qdisc)
-{
-    uint32_t parent = rtnl_tc_get_parent(TC_CAST(qdisc));
-    if (parent == TC_H_ROOT) {
-        return TC_H_ROOT;
-    }
-
-    uint32_t minor = TC_H_MIN(parent);
-    if (minor > 0) {
-        --minor;
-    }
-
-    return minor;
-}
-
-static void
-queue_stats_fill(of_queue_stats_entry_t *list, struct nl_object *qdisc,
-                 of_port_no_t port_no, uint32_t queue_id)
-{
-    of_queue_stats_entry_t entry[1];
-    of_queue_stats_entry_init(entry, list->version, -1, 1);
-
-    /* FIXME: This entry didn't fit, send out the current message and
-     * allocate a new one. */
-    if (of_list_queue_stats_entry_append_bind(list, entry) < 0) {
-        return;
-    }
-
-    of_queue_stats_entry_port_no_set(entry, port_no);
-    of_queue_stats_entry_queue_id_set(entry, queue_id);
-
-    of_queue_stats_entry_tx_packets_set(entry, rtnl_tc_get_stat(TC_CAST(qdisc), RTNL_TC_PACKETS));
-    of_queue_stats_entry_tx_bytes_set(entry, rtnl_tc_get_stat(TC_CAST(qdisc), RTNL_TC_BYTES));
-    of_queue_stats_entry_tx_errors_set(entry, rtnl_tc_get_stat(TC_CAST(qdisc), RTNL_TC_DROPS));
-}
-
 indigo_error_t
-indigo_port_queue_stats_get(
-    of_queue_stats_request_t *queue_stats_request,
-    of_queue_stats_reply_t **queue_stats_reply_ptr)
+indigo_port_queue_stats_get_one(
+    of_port_no_t port_no, uint32_t queue_id,
+    of_queue_stats_entry_t *queue_stats)
 {
     ind_ovs_update_qdisc_stats();
 
-    of_queue_stats_reply_t *queue_stats_reply = of_queue_stats_reply_new(queue_stats_request->version);
-    if (queue_stats_reply == NULL) {
-        return INDIGO_ERROR_RESOURCE;
+    of_queue_stats_entry_port_no_set(queue_stats, port_no);
+    of_queue_stats_entry_queue_id_set(queue_stats, queue_id);
+
+    struct ind_ovs_port *port = ind_ovs_port_lookup(port_no);
+    if (port == NULL) {
+        return INDIGO_ERROR_NOT_FOUND;
     }
 
-    uint32_t xid;
-    of_queue_stats_request_xid_get(queue_stats_request, &xid);
-    of_queue_stats_reply_xid_set(queue_stats_reply, xid);
-
-    of_port_no_t req_of_port_num;
-    of_queue_stats_request_port_no_get(queue_stats_request, &req_of_port_num);
-
-    /* For OF 1.0 OFPP_ALL refers to all ports, in later versions it is OFPP_ANY */
-    bool dump_all_ports;
-    if (queue_stats_request->version == OF_VERSION_1_0) {
-        dump_all_ports = req_of_port_num == OF_PORT_DEST_ALL_BY_VERSION(queue_stats_request->version);
-    } else {
-        dump_all_ports = req_of_port_num == OF_PORT_DEST_NONE_BY_VERSION(queue_stats_request->version);
+    /* XXX rtnl_qdisc_get is linear time */
+    struct rtnl_qdisc *qdisc = rtnl_qdisc_get(qdisc_cache, port->ifindex, queue_id+1);
+    if (qdisc == NULL) {
+        return INDIGO_ERROR_NOT_FOUND;
     }
 
-    /* There are no queue's for local port */
-    if (req_of_port_num == OVSP_LOCAL) {
-        *queue_stats_reply_ptr = queue_stats_reply;
-        return INDIGO_ERROR_NONE;
-    }
+    of_queue_stats_entry_tx_packets_set(queue_stats, rtnl_tc_get_stat(TC_CAST(qdisc), RTNL_TC_PACKETS));
+    of_queue_stats_entry_tx_bytes_set(queue_stats, rtnl_tc_get_stat(TC_CAST(qdisc), RTNL_TC_BYTES));
+    of_queue_stats_entry_tx_errors_set(queue_stats, rtnl_tc_get_stat(TC_CAST(qdisc), RTNL_TC_DROPS));
 
-    uint32_t req_queue_id;
-    of_queue_stats_request_queue_id_get(queue_stats_request, &req_queue_id);
-    bool dump_all_queues = req_queue_id == OF_QUEUE_ALL_BY_VERSION(queue_id);
-
-    of_queue_stats_entry_t list;
-    of_queue_stats_reply_entries_bind(queue_stats_reply, &list);
-
-    struct nl_object *qdisc;
-    for (qdisc = nl_cache_get_first(qdisc_cache); qdisc; qdisc = nl_cache_get_next(qdisc)) {
-        uint32_t queue_id = qdisc_get_queue_id(qdisc);
-        /* Skip the root qdisc */
-        if (queue_id == TC_H_ROOT) continue;
-
-
-        struct ind_ovs_port *port = ind_ovs_port_lookup_by_ifindex(rtnl_tc_get_ifindex(TC_CAST(qdisc)));
-        /* It's possible that there are qdiscs on interfaces not attached to IVS */
-        if (port == NULL) continue;
-
-        of_port_no_t port_no = port->dp_port_no;
-        bool dump_port = dump_all_ports || (req_of_port_num == port_no);
-        bool dump_queue = dump_all_queues || (req_queue_id == queue_id);
-        if (dump_port && dump_queue) {
-            queue_stats_fill(&list, qdisc, port_no, queue_id);
-        }
-    }
-
-    *queue_stats_reply_ptr = queue_stats_reply;
     return INDIGO_ERROR_NONE;
 }
 
