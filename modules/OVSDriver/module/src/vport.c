@@ -37,8 +37,10 @@
 struct ind_ovs_port *ind_ovs_ports[IND_OVS_MAX_PORTS];  /**< Table of all ports */
 
 static struct nl_sock *route_cache_sock;
+static struct nl_sock *route_cache_refill_sock;
 static struct nl_cache_mngr *route_cache_mngr;
 static struct nl_cache *link_cache;
+static struct nl_cache *qdisc_cache;
 static struct nl_cb *netlink_callbacks;
 
 static indigo_error_t port_status_notify(uint32_t port_no, unsigned reason);
@@ -47,7 +49,8 @@ static void alloc_port_counters(struct ind_ovs_port_counters *pcounters);
 static void free_port_counters(struct ind_ovs_port_counters *pcounters);
 static uint64_t get_packet_stats(struct stats_handle *handle);
 
-aim_ratelimiter_t nl_cache_refill_limiter;
+aim_ratelimiter_t link_cache_refill_limiter;
+aim_ratelimiter_t qdisc_cache_refill_limiter;
 
 static struct ind_ovs_port_counters dummy_stats;
 
@@ -80,9 +83,18 @@ truncate_of_object(of_object_t *obj)
 static void
 ind_ovs_update_link_stats()
 {
-    if (aim_ratelimiter_limit(&nl_cache_refill_limiter, monotonic_us()) == 0) {
+    if (aim_ratelimiter_limit(&link_cache_refill_limiter, monotonic_us()) == 0) {
         /* Refresh statistics */
-        nl_cache_refill(route_cache_sock, link_cache);
+        nl_cache_refill(route_cache_refill_sock, link_cache);
+    }
+}
+
+static void
+ind_ovs_update_qdisc_stats()
+{
+    if (aim_ratelimiter_limit(&qdisc_cache_refill_limiter, monotonic_us()) == 0) {
+        /* Refresh statistics */
+        nl_cache_refill(route_cache_refill_sock, qdisc_cache);
     }
 }
 
@@ -706,6 +718,8 @@ indigo_port_queue_stats_get(
     of_queue_stats_request_t *queue_stats_request,
     of_queue_stats_reply_t **queue_stats_reply_ptr)
 {
+    ind_ovs_update_qdisc_stats();
+
     of_queue_stats_reply_t *queue_stats_reply = of_queue_stats_reply_new(queue_stats_request->version);
     if (queue_stats_reply == NULL) {
         return INDIGO_ERROR_RESOURCE;
@@ -736,31 +750,11 @@ indigo_port_queue_stats_get(
     of_queue_stats_request_queue_id_get(queue_stats_request, &req_queue_id);
     bool dump_all_queues = req_queue_id == OF_QUEUE_ALL_BY_VERSION(queue_id);
 
-    int rv;
-    struct nl_sock *sk = nl_socket_alloc();
-    if (sk == NULL) {
-        AIM_DIE("failed to allocate netlink socket");
-    }
-
-    if ((rv = nl_connect(sk, NETLINK_ROUTE)) < 0) {
-        AIM_DIE("failed to connect netlink socket: %s", nl_geterror(rv));
-    }
-
-    struct nl_cache *all_qdiscs;
-    if (rtnl_qdisc_alloc_cache(sk, &all_qdiscs) < 0) {
-        AIM_DIE("error while retrieving qdisc cfg");
-    }
-
-    /* Check if the cache is empty */
-    if (nl_cache_is_empty(all_qdiscs)) {
-        goto done;
-    }
-
     of_queue_stats_entry_t list;
     of_queue_stats_reply_entries_bind(queue_stats_reply, &list);
 
     struct nl_object *qdisc;
-    for (qdisc = nl_cache_get_first(all_qdiscs); qdisc; qdisc = nl_cache_get_next(qdisc)) {
+    for (qdisc = nl_cache_get_first(qdisc_cache); qdisc; qdisc = nl_cache_get_next(qdisc)) {
         uint32_t queue_id = qdisc_get_queue_id(qdisc);
         /* Skip the root qdisc */
         if (queue_id == TC_H_ROOT) continue;
@@ -778,9 +772,6 @@ indigo_port_queue_stats_get(
         }
     }
 
-done:
-    nl_cache_free(all_qdiscs);
-    nl_socket_free(sk);
     *queue_stats_reply_ptr = queue_stats_reply;
     return INDIGO_ERROR_NONE;
 }
@@ -974,6 +965,16 @@ ind_ovs_port_init(void)
         abort();
     }
 
+    route_cache_refill_sock = nl_socket_alloc();
+    if (route_cache_refill_sock == NULL) {
+        LOG_ERROR("nl_socket_alloc failed");
+        abort();
+    }
+
+    if ((nlerr = nl_connect(route_cache_refill_sock, NETLINK_ROUTE)) < 0) {
+        AIM_DIE("nl_connect failed: %s", nl_geterror(nlerr));
+    }
+
     if ((nlerr = nl_cache_mngr_alloc(route_cache_sock, NETLINK_ROUTE,
                                      0, &route_cache_mngr)) < 0) {
         LOG_ERROR("nl_cache_mngr_alloc failed: %s", nl_geterror(nlerr));
@@ -998,7 +999,12 @@ ind_ovs_port_init(void)
         abort();
     }
 
-    aim_ratelimiter_init(&nl_cache_refill_limiter, 1000*1000, 0, NULL);
+    if (rtnl_qdisc_alloc_cache(route_cache_refill_sock, &qdisc_cache) < 0) {
+        AIM_DIE("rtnl_qdisc_alloc_cache failed: %s", nl_geterror(nlerr));
+    }
+
+    aim_ratelimiter_init(&link_cache_refill_limiter, 1000*1000, 0, NULL);
+    aim_ratelimiter_init(&qdisc_cache_refill_limiter, 1000*1000, 0, NULL);
 }
 
 void
